@@ -1,72 +1,30 @@
-test
-public static String buildModuleJson(String projectId,
-                                         String name,
-                                         List<Map<String, String>> connections) throws Exception {
-        ObjectNode root = MAPPER.createObjectNode();
-        root.put("project_id", projectId);
-        root.put("name",       name);
+import org.junit.jupiter.api.extension.*;
+import java.time.Duration;
 
-        for (Map<String, String> row : connections) {
-            String type  = row.get("type");           // "SOURCE" или "TARGET"
-            String field = type.toLowerCase();        // "source" или "target"
+public class ScenarioTimeoutExtension implements BeforeTestExecutionCallback, AfterTestExecutionCallback {
 
-            ObjectNode node = root.putObject(field);
-            node.put("type",          type);
-            node.put("connection_id", row.get("connection_id"));
+    private static final long TIMEOUT_SECONDS = 90;
 
-            // жёстко задаём on_error = [{ "type":"ANY_ERROR", "action":"SKIP" }]
-            ArrayNode onError = node.putArray("on_error");
-            onError.addObject()
-                   .put("type",   "ANY_ERROR")
-                   .put("action", "SKIP");
-        }
+    private final ThreadLocal<Thread> testThread = new ThreadLocal<>();
 
-        return MAPPER
-            .writerWithDefaultPrettyPrinter()
-            .writeValueAsString(root);
+    @Override
+    public void beforeTestExecution(ExtensionContext context) {
+        Thread current = Thread.currentThread();
+        testThread.set(current);
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(TIMEOUT_SECONDS * 1000);
+                if (current.isAlive()) {
+                    System.err.println("[TIMEOUT] Scenario exceeded " + TIMEOUT_SECONDS + "s — interrupting.");
+                    current.interrupt();  // это вызовет исключение в степах, если те ждут
+                }
+            } catch (InterruptedException ignored) { }
+        }).start();
+    }
+
+    @Override
+    public void afterTestExecution(ExtensionContext context) {
+        testThread.remove();
     }
 }
-
-public static HttpResponse<String> createModule(String name,
-                                                    List<Map<String, String>> connections) throws Exception {
-        String body = ModuleJsonBuilder
-            .buildModuleJson(PROJECT_ID, name, connections);
-
-        HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + MODULE_ENDPOINT))
-            .header("Content-Type", "application/json; charset=UTF-8")
-            .POST(HttpRequest.BodyPublishers.ofString(body))
-            .build();
-
-        HttpResponse<String> response = HTTP_CLIENT
-            .send(request, HttpResponse.BodyHandlers.ofString());
-
-        // Извлечь UUID из ответа и зарегистрировать на удаление
-        String uuid = Context.extractUuid(response.body());
-        Context.get().addResourceToDelete(Context.ResourceType.MODULE, uuid);
-
-        return response;
-    }
-@Когда("я создаю модуль с именем {string} и связанными соединениями")
-    public void createModuleStep(String name, DataTable table) throws Exception {
-        // распарсим DataTable в List<Map<String,String>>
-        List<Map<String,String>> rows = table.asMaps(String.class, String.class);
-
-        // вызов HTTP-сервиса
-        HttpResponse<String> response = GradelyWorkerTestService.createModule(
-            name,
-            rows
-        );
-
-        // проверка статус-кода
-        assertThat(response.statusCode())
-            .as("Создание модуля «%s»", name)
-            .isEqualTo(200);
-
-        System.out.println("Ответ при создании модуля " + name + ": " + response.body());
-    }
-
-Когда я создаю модуль с именем "autotest_destination_module" и связанными соединениями
-  | type   | connection_id                           |
-  | SOURCE | 3ac62055-a731-43b4-8ace-252828022714    |
-  | TARGET | 339855f7-fca5-42cd-94bc-f69894117636    |
